@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "./auth";
-import { ApiPath, GEMINI_BASE_URL, ModelProvider } from "@/app/constant";
+import { ApiPath, GEMINI_BASE_URL, ModelProvider } void } from "@/app/constant";
 import { prettyObject } from "@/app/utils/format";
 
 export async function handle(
@@ -50,7 +50,7 @@ async function request(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  // === 构造最终 URL ===
+  // ---------- 1. 拼装请求 URL ----------
   let baseUrl = useServerConfig
     ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
     : GEMINI_BASE_URL;
@@ -74,16 +74,16 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  // === 读取并彻底清洗 body ===
+  // ---------- 2. 读取并清洗请求体 ----------
   let rawBody = "";
   try {
-    rawBody = await req.text();  // 读完就丢掉原来的 stream
+    rawBody = await req.text(); // 读完后原来的 req.body 就失效了
   } catch (e) {
     clearTimeout(timeoutId);
     return NextResponse.json({ error: "Failed to read body" }, { status: 400 });
   }
 
-  console.log("[Google] 原始 body:", rawBody.substring(0, 500));
+  console.log("[Google Debug] 原始 body:", rawBody.slice(0, 500));
 
   let jsonBody: any = {};
   if (rawBody) {
@@ -95,22 +95,36 @@ async function request(
     }
   }
 
-  // 深度删除所有非法字段
-  function deepDelete(obj: any, keys: string[]) {
+  // 深度删除 Google 官方不认识的所有字段（不管在哪一层）
+  const deepDelete = (obj: any, keys: string[]): void => {
     if (!obj || typeof obj !== "object") return;
-    if (Array.isArray(obj)) return obj.forEach(o => deepDelete(o, keys));
-    keys.forEach(k => delete (obj as any)[k]);
-    Object.keys(obj).forEach(k => deepDelete((obj as any)[k], keys));
-  }
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => deepDelete(item, keys));
+      return;
+    }
+    keys.forEach((k) => delete (obj as any)[k]);
+    Object.keys(obj).forEach((k) => deepDelete((obj as any)[k], keys));
+  };
 
   deepDelete(jsonBody, [
-    "provider", "path", "model", "stream", "temperature",
-    "max_tokens", "top_p", "top_k", "options", "extra", "custom"
+    "provider",
+    "path",
+    "model",
+    "stream",
+    "temperature",
+    "max_tokens",
+",
+    "top_p",
+    "top_k",
+    "options",
+    "extra",
+    "custom",
   ]);
 
-  console.log("[Google] 发送给官方的干净 payload:", JSON.stringify(jsonBody, null, 2));
+  console.log("[Google Debug] 发送给官方的干净 payload:");
+  console.log(JSON.stringify(jsonBody, null, 2));
 
-  // === 关键：不再使用 req.body，自己生成干净的 body ===
+  // ---------- 3. 真正发起请求 ----------
   const fetchOptions: RequestInit = {
     method: req.method,
     headers: {
@@ -129,7 +143,7 @@ async function request(
 
     if (!res.ok) {
       const err = await res.text();
-      console.error("[Google] 官方错误:", res.status, err);
+      console.error("[Google] 官方返回错误:", res.status, err);
     }
 
     const newHeaders = new Headers(res.headers);
