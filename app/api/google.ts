@@ -20,11 +20,11 @@ export async function handle(
   if (authResult.useServerConfig) {
     apiKey = process.env.GOOGLE_API_KEY || "";
   } else {
-    const bearToken =
+    const token =
       req.headers.get("x-goog-api-key") ||
       req.headers.get("Authorization") ||
       "";
-    apiKey = bearToken.trim().replaceAll("Bearer ", "").trim();
+    apiKey = token.trim().replace(/^Bearer\s+/i, "");
   }
 
   const subpath = params.path.join("/");
@@ -50,7 +50,7 @@ async function request(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  // 构造请求 URL
+  // ---------- URL ----------
   let baseUrl = useServerConfig
     ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
     : GEMINI_BASE_URL;
@@ -74,22 +74,22 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  // 读取并清洗 body
+  // ---------- 读取并清洗 body ----------
   let rawBody = "";
   try {
     rawBody = await req.text();
-  } catch (e) {
+  } catch {
     clearTimeout(timeoutId);
     return NextResponse.json({ error: "Failed to read body" }, { status: 400 });
   }
 
-  console.log("[Google] 原始请求体:", rawBody.slice(0, 500));
+  console.log("[Google] 原始 body:", rawBody.slice(0, 500));
 
   let jsonBody: any = {};
   if (rawBody) {
     try {
       jsonBody = JSON.parse(rawBody);
-    } catch (e) {
+    } catch {
       clearTimeout(timeoutId);
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
@@ -99,11 +99,11 @@ async function request(
   const deepDelete = (obj: any, keys: string[]): void => {
     if (!obj || typeof obj !== "object") return;
     if (Array.isArray(obj)) {
-      obj.forEach(item => deepDelete(item, keys));
+      obj.forEach((item) => deepDelete(item, keys));
       return;
     }
-    keys.forEach(k => delete (obj as any)[k]);
-    Object.keys(obj).forEach(k => deepDelete((obj as any)[k], keys));
+    keys.forEach((k) => delete (obj as any)[k]);
+    Object.keys(obj).forEach((k) => deepDelete((obj as any)[k], keys));
   };
 
   deepDelete(jsonBody, [
@@ -120,10 +120,10 @@ async function request(
     "custom",
   ]);
 
-  console.log("[Google] 发送给官方的 payload:");
+  console.log("[Google] 发送给官方的干净 payload:");
   console.log(JSON.stringify(jsonBody, null, 2));
 
-  // 发起请求（不再使用 req.body）
+  // ---------- 发起请求（关键：不再使用 req.body）----------
   const fetchOptions: RequestInit = {
     method: req.method,
     headers: {
@@ -134,7 +134,8 @@ async function request(
     body: Object.keys(jsonBody).length === 0 ? null : JSON.stringify(jsonBody),
     signal: controller.signal,
     redirect: "manual",
-    duplex: "half" as const,
+    // @ts-ignore Edge Runtime 需要 duplex，但 TS 不知道
+    duplex: "half",
   };
 
   try {
