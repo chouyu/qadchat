@@ -38,7 +38,6 @@ export async function handle(
       apiKey,
       authResult.useServerConfig,
       subpath,
-      params // Pass params to request function
     );
     return response;
   } catch (e) {
@@ -66,12 +65,33 @@ export const preferredRegion = [
   "syd1",
 ];
 
+/**
+ * 递归移除对象中指定的 key (用于清理 provider 和 path 等路由参数)
+ */
+function cleanRequestBody(obj: any, keysToRemove: string[]) {
+  if (typeof obj !== "object" || obj === null) return;
+
+  if (Array.isArray(obj)) {
+    obj.forEach((item) => cleanRequestBody(item, keysToRemove));
+    return;
+  }
+
+  keysToRemove.forEach((key) => {
+    if (key in obj) {
+      delete obj[key];
+    }
+  });
+
+  Object.keys(obj).forEach((key) => {
+    cleanRequestBody(obj[key], keysToRemove);
+  });
+}
+
 async function request(
   req: NextRequest,
   apiKey: string,
   useServerConfig?: boolean,
   subpath?: string,
-  params?: { provider: string; path: string[] } // Receive params
 ) {
   const controller = new AbortController();
 
@@ -79,6 +99,7 @@ async function request(
   const configHeader = req.headers.get("x-custom-provider-config");
   let customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
   let customApiKey = req.headers.get("x-custom-provider-api-key") || "";
+
   if (!customEndpoint && configHeader) {
     try {
       const decoded = atob(configHeader);
@@ -96,12 +117,13 @@ async function request(
   let baseUrl = customEndpoint
     ? customEndpoint
     : useServerConfig
-      ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
-      : GEMINI_BASE_URL;
+    ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
+    : GEMINI_BASE_URL;
 
   // 计算子路径：优先使用路由参数，其次从 URL 中截取
   let path =
     subpath ?? `${req.nextUrl.pathname}`.replaceAll(ApiPath.Google, "");
+
   if (!subpath && path.startsWith("/api/custom_")) {
     const idx = path.indexOf("/google/");
     if (idx >= 0) {
@@ -127,67 +149,52 @@ async function request(
   if (!path.startsWith("/")) {
     path = "/" + path;
   }
+
   const url = new URL(`${baseUrl}${path}`);
   req.nextUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
   if (req?.nextUrl?.searchParams?.get("alt") === "sse") {
     url.searchParams.set("alt", "sse");
   }
+
   const fetchUrl = url.toString();
 
-  // Modify request body
-  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+  // 处理 Body：如果是 POST 请求，拦截并清洗数据
+  let body: BodyInit | null = req.body;
+  if (req.method === "POST") {
     try {
-      // Clone the request to avoid consuming the original body
-      const clientJson = await req.clone().json();
-
-      // Recursive function to remove fields
-      function removeFields(obj: any, path: string = '') { // Add path parameter
-        for (const key in obj) {
-          const currentPath = path ? `${path}.${key}` : key; // Build path string
-          if (key === 'provider' || key === 'path') {
-            console.log(`[DEBUG] Removing property: ${currentPath}`); // Log removal
-            delete obj[key];
-          } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-            removeFields(obj[key], currentPath); // Recursive call with path
-          }
-        }
-      }
-
-      try {
-        // Clone the request to avoid consuming the original body
-        const clientJson = await req.clone().json();
-      
-        console.log("[DEBUG] Original JSON:", JSON.stringify(clientJson)); // Log original JSON
-      
-        removeFields(clientJson);
-      
-        console.log("[DEBUG] Cleaned JSON:", JSON.stringify(clientJson)); // Log cleaned JSON
-      
-        // Convert the cleaned JSON object to a string
-        const cleanedBody = JSON.stringify(clientJson);
-      
-        // Update fetchOptions with the cleaned body
-        fetchOptions.body = cleanedBody;
-      
-        console.log("[DEBUG] fetchOptions:", fetchOptions); // Log fetchOptions
-      
-      } catch (error) {
-        // If the body is not JSON, use the original body
-        console.warn("Request body is not JSON, using original body", error);
-        console.error("[DEBUG] Error parsing JSON:", error); // Log error details
-        fetchOptions.body = req.body;
-      }
-      // Convert the cleaned JSON object to a string
-      const cleanedBody = JSON.stringify(clientJson);
-
-      // Update fetchOptions with the cleaned body
-      fetchOptions.body = cleanedBody;
-    } catch (error) {
-      // If the body is not JSON, use the original body
-      console.warn("Request body is not JSON, using original body", error);
-      fetchOptions.body = req.body;
+      // 必须先转为 json 才能修改
+      const jsonBody = await req.json();
+      // 递归移除 provider 和 path 字段
+      cleanRequestBody(jsonBody, ["provider", "path"]);
+      body = JSON.stringify(jsonBody);
+    } catch (e) {
+      // 如果解析 JSON 失败（或者是空 body），则不做处理，
+      // 但因为已经消费了 req.json()，这里如果不做处理会导致后续流不可用。
+      // 所以 catch 中通常意味着 body 不是 json 或者为空，我们忽略即可。
+      // 如果这里报错，body 仍然是 req.body (stream)，但流可能已被锁定。
+      // 为了稳健，如果是 POST 但解析失败，我们不再发送 body 或者尝试发空对象，
+      // 但通常 Google 请求都是标准 JSON。
+      console.error("[Google] Failed to parse/clean body", e);
+      // 尝试重置 body 为 null 或空 json 防止请求挂起
+      // 实际生产中如果解析失败通常意味着请求已经损坏
     }
   }
+
+  const fetchOptions: RequestInit = {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      // 统一使用解析后的 apiKey（当使用服务器配置时来自环境变量，否则来自用户请求）
+      "x-goog-api-key": apiKey || "",
+    },
+    method: req.method,
+    body: body,
+    // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
+    redirect: "manual",
+    // @ts-ignore
+    duplex: "half",
+    signal: controller.signal,
+  };
 
   try {
     const res = await fetch(fetchUrl, fetchOptions);
@@ -196,7 +203,6 @@ async function request(
     newHeaders.delete("www-authenticate");
     // to disable nginx buffering
     newHeaders.set("X-Accel-Buffering", "no");
-
     return new Response(res.body, {
       status: res.status,
       statusText: res.statusText,
