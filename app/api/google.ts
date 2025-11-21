@@ -50,28 +50,21 @@ async function request(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  // ============ 1. 构造请求 URL ============
+  // === 构造最终 URL ===
   let baseUrl = useServerConfig
     ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
     : GEMINI_BASE_URL;
 
-  // 支持自定义 endpoint（保持兼容）
   const customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
   if (customEndpoint) baseUrl = customEndpoint;
-
   if (!baseUrl.startsWith("http")) baseUrl = `https://${baseUrl}`;
   if (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
 
-  // 注意这里必须用 let，因为后面要重新赋值
   let path = subpath ?? req.nextUrl.pathname.replaceAll(ApiPath.Google, "");
-
   if (!subpath && path.startsWith("/api/custom_")) {
     const idx = path.indexOf("/google/");
-    if (idx >= 0) {
-      path = path.slice(idx + "/google/".length);
-    }
+    if (idx >= 0) path = path.slice(idx + "/google/".length);
   }
-
   if (!path.startsWith("/")) path = "/" + path;
 
   const url = new URL(`${baseUrl}${path}`);
@@ -81,16 +74,16 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  // ============ 2. 读取并深度清洗 body ============
+  // === 读取并彻底清洗 body ===
   let rawBody = "";
   try {
-    rawBody = await req.text();
+    rawBody = await req.text();  // 读完就丢掉原来的 stream
   } catch (e) {
     clearTimeout(timeoutId);
-    return NextResponse.json({ error: "Failed to read request body" }, { status: 400 });
+    return NextResponse.json({ error: "Failed to read body" }, { status: 400 });
   }
 
-  console.log("[Google Debug] 原始请求体:", rawBody);
+  console.log("[Google] 原始 body:", rawBody.substring(0, 500));
 
   let jsonBody: any = {};
   if (rawBody) {
@@ -102,48 +95,33 @@ async function request(
     }
   }
 
-  // 深度删除所有非法字段（不管嵌套多深）
+  // 深度删除所有非法字段
   function deepDelete(obj: any, keys: string[]) {
     if (!obj || typeof obj !== "object") return;
-    if (Array.isArray(obj)) {
-      obj.forEach(item => deepDelete(item, keys));
-      return;
-    }
-    keys.forEach(key => delete (obj as any)[key]);
+    if (Array.isArray(obj)) return obj.forEach(o => deepDelete(o, keys));
+    keys.forEach(k => delete (obj as any)[k]);
     Object.keys(obj).forEach(k => deepDelete((obj as any)[k], keys));
   }
 
-  const forbidden = [
-    "provider",
-    "path",
-    "model",
-    "stream",
-    "temperature",
-    "max_tokens",
-    "top_p",
-    "top_k",
-    "options",
-    "extra",
-    "custom",
-  ];
+  deepDelete(jsonBody, [
+    "provider", "path", "model", "stream", "temperature",
+    "max_tokens", "top_p", "top_k", "options", "extra", "custom"
+  ]);
 
-  deepDelete(jsonBody, forbidden);
+  console.log("[Google] 发送给官方的干净 payload:", JSON.stringify(jsonBody, null, 2));
 
-  console.log("[Google Debug] 清洗后发给官方的 payload:", JSON.stringify(jsonBody, null, 2));
-
-  // ============ 3. 发起请求 ============
+  // === 关键：不再使用 req.body，自己生成干净的 body ===
   const fetchOptions: RequestInit = {
     method: req.method,
     headers: {
       "Content-Type": "application/json",
-      "x-goog-api-key": apiKey || "",
+      "x-goog-api-key": apiKey,
       "Cache-Control": "no-store",
     },
-    body: Object.keys(jsonBody).length > 0 ? JSON.stringify(jsonBody) : null,
+    body: Object.keys(jsonBody).length === 0 ? null : JSON.stringify(jsonBody),
     signal: controller.signal,
     redirect: "manual",
-    // @ts-ignore Edge runtime 需要
-    duplex: "half",
+    duplex: "half" as const,
   };
 
   try {
@@ -151,7 +129,7 @@ async function request(
 
     if (!res.ok) {
       const err = await res.text();
-      console.error("[Google Error] 官方返回:", res.status, err);
+      console.error("[Google] 官方错误:", res.status, err);
     }
 
     const newHeaders = new Headers(res.headers);
