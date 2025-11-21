@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "./auth";
-import { ApiPath, GEMINI_BASE_URL, ModelProvider } void } from "@/app/constant";
+import { ApiPath, GEMINI_BASE_URL, ModelProvider } from "@/app/constant";
 import { prettyObject } from "@/app/utils/format";
 
 export async function handle(
