@@ -157,18 +157,42 @@ async function request(
       const clientJson = await req.clone().json();
 
       // Recursive function to remove fields
-      function removeFields(obj: any) {
+      function removeFields(obj: any, path: string = '') { // Add path parameter
         for (const key in obj) {
+          const currentPath = path ? `${path}.${key}` : key; // Build path string
           if (key === 'provider' || key === 'path') {
+            console.log(`[DEBUG] Removing property: ${currentPath}`); // Log removal
             delete obj[key];
           } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-            removeFields(obj[key]); // Recursive call
+            removeFields(obj[key], currentPath); // Recursive call with path
           }
         }
       }
 
-      removeFields(clientJson);
-
+      try {
+        // Clone the request to avoid consuming the original body
+        const clientJson = await req.clone().json();
+      
+        console.log("[DEBUG] Original JSON:", JSON.stringify(clientJson)); // Log original JSON
+      
+        removeFields(clientJson);
+      
+        console.log("[DEBUG] Cleaned JSON:", JSON.stringify(clientJson)); // Log cleaned JSON
+      
+        // Convert the cleaned JSON object to a string
+        const cleanedBody = JSON.stringify(clientJson);
+      
+        // Update fetchOptions with the cleaned body
+        fetchOptions.body = cleanedBody;
+      
+        console.log("[DEBUG] fetchOptions:", fetchOptions); // Log fetchOptions
+      
+      } catch (error) {
+        // If the body is not JSON, use the original body
+        console.warn("Request body is not JSON, using original body", error);
+        console.error("[DEBUG] Error parsing JSON:", error); // Log error details
+        fetchOptions.body = req.body;
+      }
       // Convert the cleaned JSON object to a string
       const cleanedBody = JSON.stringify(clientJson);
 
