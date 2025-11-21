@@ -1,4 +1,3 @@
-cat app/api/google.ts 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "./auth";
 import { ApiPath, GEMINI_BASE_URL, ModelProvider } from "@/app/constant";
