@@ -127,7 +127,7 @@ async function request(
     "custom",
   ];
 
-  deep663Delete(jsonBody, forbidden);
+  deepDelete(jsonBody, forbidden);
 
   console.log("[Google Debug] 清洗后发给官方的 payload:", JSON.stringify(jsonBody, null, 2));
 
