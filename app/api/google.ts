@@ -30,15 +30,9 @@ export async function handle(
   const subpath = params.path.join("/");
 
   try {
-    const response = await request(
-      req,
-      apiKey,
-      authResult.useServerConfig,
-      subpath,
-    );
-    return response;
+    return await request(req, apiKey, authResult.useServerConfig, subpath);
   } catch (e) {
-    console.error("[Google] 转发异常:", e);
+    console.error("[Google] error:", e);
     return NextResponse.json(prettyObject(e));
   }
 }
@@ -47,7 +41,6 @@ export const GET = handle;
 export const POST = handle;
 export const runtime = "edge";
 
-/** 调试 + 彻底根治版 request */
 async function request(
   req: NextRequest,
   apiKey: string,
@@ -57,23 +50,28 @@ async function request(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  // === 1. 构造 baseUrl 和 path（保持原逻辑）===
+  // ============ 1. 构造请求 URL ============
   let baseUrl = useServerConfig
     ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
     : GEMINI_BASE_URL;
 
-  // 自定义 endpoint 支持（保持原样，略）
+  // 支持自定义 endpoint（保持兼容）
   const customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
   if (customEndpoint) baseUrl = customEndpoint;
 
   if (!baseUrl.startsWith("http")) baseUrl = `https://${baseUrl}`;
   if (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
 
+  // 注意这里必须用 let，因为后面要重新赋值
   let path = subpath ?? req.nextUrl.pathname.replaceAll(ApiPath.Google, "");
+
   if (!subpath && path.startsWith("/api/custom_")) {
     const idx = path.indexOf("/google/");
-    if (idx >= 0) path = path.slice(idx + "/google/".length);
+    if (idx >= 0) {
+      path = path.slice(idx + "/google/".length);
+    }
   }
+
   if (!path.startsWith("/")) path = "/" + path;
 
   const url = new URL(`${baseUrl}${path}`);
@@ -83,81 +81,77 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  // === 2. 读取并深度清洗 body ===
+  // ============ 2. 读取并深度清洗 body ============
   let rawBody = "";
   try {
     rawBody = await req.text();
   } catch (e) {
     clearTimeout(timeoutId);
-    return NextResponse.json({ error: "无法读取请求体" }, { status: 400 });
+    return NextResponse.json({ error: "Failed to read request body" }, { status: 400 });
   }
 
-  console.log("[Google] 原始收到的 body:", rawBody);
+  console.log("[Google Debug] 原始请求体:", rawBody);
 
-  let originalJson: any = {};
-  try {
-    originalJson = rawBody ? JSON.parse(rawBody) : {};
-  } catch (e) {
-    clearTimeout(timeoutId);
-    return NextResponse.json({ error: "非法的 JSON" }, { status: 400 });
-  }
-
-  // 深度删除所有可能出现的 provider / path 字段（不管在第几层）
-  function deepDelete(obj: any, keysToDelete: string[]) {
-    if (Array.isArray(obj)) {
-      obj.forEach(item => deepDelete(item, keysToDelete));
-    } else if (obj && typeof obj === "object") {
-      for (const key of keysToDelete) {
-        delete obj[key];
-      }
-      for (const key of Object.keys(obj)) {
-        deepDelete(obj[key], keysToDelete);
-      }
+  let jsonBody: any = {};
+  if (rawBody) {
+    try {
+      jsonBody = JSON.parse(rawBody);
+    } catch (e) {
+      clearTimeout(timeoutId);
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
   }
 
-  // 这些字段 Google 官方一个都不认，全部干掉
-  const forbiddenKeys = [
+  // 深度删除所有非法字段（不管嵌套多深）
+  function deepDelete(obj: any, keys: string[]) {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) {
+      obj.forEach(item => deepDelete(item, keys));
+      return;
+    }
+    keys.forEach(key => delete (obj as any)[key]);
+    Object.keys(obj).forEach(k => deepDelete((obj as any)[k], keys));
+  }
+
+  const forbidden = [
     "provider",
     "path",
-    "model",           // Google 用 URL 指定模型
-    "stream",          // 官方用 alt=sse
+    "model",
+    "stream",
     "temperature",
     "max_tokens",
     "top_p",
     "top_k",
     "options",
-    "custom",
     "extra",
+    "custom",
   ];
 
-  deepDelete(originalJson, forbiddenKeys);
+  deep663Delete(jsonBody, forbidden);
 
-  // 额外保险：如果还有残留，直接删
-  const { provider, path, model, stream, ...finalBody } = originalJson;
+  console.log("[Google Debug] 清洗后发给官方的 payload:", JSON.stringify(jsonBody, null, 2));
 
-  console.log("[Google] 删除非法字段后发给官方的 payload:");
-  console.log(JSON.stringify(finalBody, null, 2));
-
+  // ============ 3. 发起请求 ============
   const fetchOptions: RequestInit = {
+    method: req.method,
     headers: {
       "Content-Type": "application/json",
       "x-goog-api-key": apiKey || "",
+      "Cache-Control": "no-store",
     },
-    method: req.method,
-    body: Object.keys(finalBody).length > 0 ? JSON.stringify(finalBody) : null,
-    redirect: "manual",
-    duplex: "half",
+    body: Object.keys(jsonBody).length > 0 ? JSON.stringify(jsonBody) : null,
     signal: controller.signal,
+    redirect: "manual",
+    // @ts-ignore Edge runtime 需要
+    duplex: "half",
   };
 
   try {
     const res = await fetch(fetchUrl, fetchOptions);
 
-    // 把 Google 返回的错误也打出来，方便继续调试
     if (!res.ok) {
-      const errText = await res.text();
-      console.error("[Google] 官方返回错误:", res.status, errText);
+      const err = await res.text();
+      console.error("[Google Error] 官方返回:", res.status, err);
     }
 
     const newHeaders = new Headers(res.headers);
@@ -169,9 +163,6 @@ async function request(
       statusText: res.statusText,
       headers: newHeaders,
     });
-  } catch (e: any) {
-    console.error("[Google] fetch 异常:", e);
-    throw e;
   } finally {
     clearTimeout(timeoutId);
   }
