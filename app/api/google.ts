@@ -50,7 +50,7 @@ async function request(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  // ---------- 1. 拼装请求 URL ----------
+  // 构造请求 URL
   let baseUrl = useServerConfig
     ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
     : GEMINI_BASE_URL;
@@ -74,16 +74,16 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  // ---------- 2. 读取并清洗请求体 ----------
+  // 读取并清洗 body
   let rawBody = "";
   try {
-    rawBody = await req.text(); // 读完后原来的 req.body 就失效了
+    rawBody = await req.text();
   } catch (e) {
     clearTimeout(timeoutId);
     return NextResponse.json({ error: "Failed to read body" }, { status: 400 });
   }
 
-  console.log("[Google Debug] 原始 body:", rawBody.slice(0, 500));
+  console.log("[Google] 原始请求体:", rawBody.slice(0, 500));
 
   let jsonBody: any = {};
   if (rawBody) {
@@ -95,15 +95,15 @@ async function request(
     }
   }
 
-  // 深度删除 Google 官方不认识的所有字段（不管在哪一层）
+  // 深度删除所有 Google 不认识的字段
   const deepDelete = (obj: any, keys: string[]): void => {
     if (!obj || typeof obj !== "object") return;
     if (Array.isArray(obj)) {
-      obj.forEach((item) => deepDelete(item, keys));
+      obj.forEach(item => deepDelete(item, keys));
       return;
     }
-    keys.forEach((k) => delete (obj as any)[k]);
-    Object.keys(obj).forEach((k) => deepDelete((obj as any)[k], keys));
+    keys.forEach(k => delete (obj as any)[k]);
+    Object.keys(obj).forEach(k => deepDelete((obj as any)[k], keys));
   };
 
   deepDelete(jsonBody, [
@@ -120,10 +120,10 @@ async function request(
     "custom",
   ]);
 
-  console.log("[Google Debug] 发送给官方的干净 payload:");
+  console.log("[Google] 发送给官方的 payload:");
   console.log(JSON.stringify(jsonBody, null, 2));
 
-  // ---------- 3. 真正发起请求 ----------
+  // 发起请求（不再使用 req.body）
   const fetchOptions: RequestInit = {
     method: req.method,
     headers: {
