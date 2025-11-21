@@ -132,15 +132,20 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  // ================= 核心修改开始 =================
-
-  // 1. 异步读取并解析前端发来的 JSON 请求体
-  const clientJson = await req.json();
+  // ================= 核心修改部分 =================
+  // 1. 异步克隆请求体并解析为 JSON
+  // 使用 clone() 是为了防止 "body stream already read" 的错误
+  const clientJson = await req.clone().json();
 
   // 2. 删除 qadchat 内部使用的、Google API 不认识的字段
   delete clientJson.provider;
   delete clientJson.path;
+  // 也可以在这里删除其他不需要的字段，例如：
+  // delete clientJson.model; 
+  // delete clientJson.stream;
 
+  // 3. 将清理后的 JSON 对象转换为字符串，作为新的请求体
+  const cleanedBody = JSON.stringify(clientJson);
   // ================= 核心修改结束 =================
 
   const fetchOptions: RequestInit = {
@@ -152,7 +157,7 @@ async function request(
     },
     method: req.method,
     // 3. 使用清理过的、纯净的 JSON 对象作为新的请求体
-    body: JSON.stringify(clientJson),
+    body: cleanedBody,
     // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
     redirect: "manual",
     // @ts-ignore
