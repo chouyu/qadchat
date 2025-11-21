@@ -1,80 +1,191 @@
-// 文件路径: app/api/google.ts
-
 import { NextRequest, NextResponse } from "next/server";
-import { GOOGLE_API_KEY } from "../../constant"; // 确认这个导入路径是否正确
+import { auth } from "./auth";
+import { ApiPath, GEMINI_BASE_URL, ModelProvider } from "@/app/constant";
+import { prettyObject } from "@/app/utils/format";
 
-const GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com";
+export async function handle(
+  req: NextRequest,
+  { params }: { params: { provider: string; path: string[] } },
+) {
+  if (req.method === "OPTIONS") {
+    return NextResponse.json({ body: "OK" }, { status: 200 });
+  }
 
-async function handle(req: NextRequest) {
-  const controller = new AbortController();
+  const authResult = auth(req, ModelProvider.GeminiPro);
+  if (authResult.error) {
+    return NextResponse.json(authResult, {
+      status: 401,
+    });
+  }
+
+  // 获取API密钥（优先使用服务器配置）
+  let apiKey = "";
+  if (authResult.useServerConfig) {
+    apiKey = process.env.GOOGLE_API_KEY || "";
+  } else {
+    const bearToken =
+      req.headers.get("x-goog-api-key") ||
+      req.headers.get("Authorization") ||
+      "";
+    apiKey = bearToken.trim().replaceAll("Bearer ", "").trim();
+  }
+
+  const subpath = params.path.join("/");
 
   try {
-    // 1. 从原始请求的 URL 中提取真实的 API 路径
-    // 例如: /api/google/v1beta/models/gemini-pro:streamGenerateContent
-    // 提取出: v1beta/models/gemini-pro:streamGenerateContent
-    const url = new URL(req.url);
-    const modelPath = url.pathname.replace("/api/google/", "");
-
-    // 2. 构造要发往 Google 的完整 URL
-    const fetchUrl = `${GOOGLE_BASE_URL}/${modelPath}`;
-
-    // 3. 克隆请求以安全地读取和修改 body
-    const clonedReq = req.clone();
-    const clientJson = await clonedReq.json();
-
-    // ====================== 核心修复点 ======================
-    //
-    //  删除 qadchat 客户端发送的、Google API 不认识的额外字段。
-    //  这正是解决 400 Bad Request 错误的关键。
-    //
-    // ========================================================
-    delete clientJson.provider;
-    delete clientJson.path;
-
-    // 4. 准备发往 Google API 的请求
-    const fetchOptions: RequestInit = {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GOOGLE_API_KEY,
-      },
-      body: JSON.stringify(clientJson),
-      signal: controller.signal,
-      // @ts-ignore
-      duplex: "half", // 在 Node.js v18+ 中用于流式请求
-    };
-
-    // 5. 发送请求到真正的 Google API
-    const res = await fetch(fetchUrl, fetchOptions);
-
-    // 6. 处理 Google API 的响应
-    // 如果 Google 返回错误，则将错误信息直接透传给客户端，方便调试
-    if (!res.ok) {
-      const errorBody = await res.text();
-      console.error(`Google API Error: ${res.status} ${res.statusText}`, errorBody);
-      return new NextResponse(errorBody, {
-        status: res.status,
-        statusText: res.statusText,
-      });
-    }
-
-    // 如果成功，将 Google API 的流式响应直接返回给客户端
-    return new NextResponse(res.body, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers, // 将 Google 的响应头也一并转发
-    });
-
-  } catch (error) {
-    console.error("Error in Google API proxy:", error);
-    if (error instanceof Error && error.name === 'AbortError') {
-      return new NextResponse("Request aborted", { status: 499 });
-    }
-    return new NextResponse(JSON.stringify({ error: "Internal Server Error" }), {
-      status: 500,
-    });
+    const response = await request(
+      req,
+      apiKey,
+      authResult.useServerConfig,
+      subpath,
+      params // Pass params to request function
+    );
+    return response;
+  } catch (e) {
+    console.error("[Google] ", e);
+    return NextResponse.json(prettyObject(e));
   }
 }
 
-// 导出 handle 函数，以符合 qadchat 的总路由约定
-export { handle };
+export const GET = handle;
+export const POST = handle;
+
+export const runtime = "edge";
+export const preferredRegion = [
+  "bom1",
+  "cle1",
+  "cpt1",
+  "gru1",
+  "hnd1",
+  "iad1",
+  "icn1",
+  "kix1",
+  "pdx1",
+  "sfo1",
+  "sin1",
+  "syd1",
+];
+
+async function request(
+  req: NextRequest,
+  apiKey: string,
+  useServerConfig?: boolean,
+  subpath?: string,
+  params?: { provider: string; path: string[] } // Receive params
+) {
+  const controller = new AbortController();
+
+  // 解析自定义服务商配置（如有）
+  const configHeader = req.headers.get("x-custom-provider-config");
+  let customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
+  let customApiKey = req.headers.get("x-custom-provider-api-key") || "";
+  if (!customEndpoint && configHeader) {
+    try {
+      const decoded = atob(configHeader);
+      const uint8Array = new Uint8Array(
+        decoded.split("").map((c) => c.charCodeAt(0)),
+      );
+      const json = new TextDecoder().decode(uint8Array);
+      const cfg = JSON.parse(json || "{}");
+      customEndpoint = cfg?.endpoint || customEndpoint;
+      customApiKey = cfg?.apiKey || customApiKey;
+    } catch {}
+  }
+
+  // 允许自定义 endpoint 覆盖（已在上方读取到 customEndpoint）
+  let baseUrl = customEndpoint
+    ? customEndpoint
+    : useServerConfig
+      ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
+      : GEMINI_BASE_URL;
+
+  // 计算子路径：优先使用路由参数，其次从 URL 中截取
+  let path =
+    subpath ?? `${req.nextUrl.pathname}`.replaceAll(ApiPath.Google, "");
+  if (!subpath && path.startsWith("/api/custom_")) {
+    const idx = path.indexOf("/google/");
+    if (idx >= 0) {
+      path = path.slice(idx + "/google/".length);
+    }
+  }
+
+  if (!baseUrl.startsWith("http")) {
+    baseUrl = `https://${baseUrl}`;
+  }
+
+  if (baseUrl.endsWith("/")) {
+    baseUrl = baseUrl.slice(0, -1);
+  }
+
+  const timeoutId = setTimeout(
+    () => {
+      controller.abort();
+    },
+    10 * 60 * 1000,
+  );
+
+  if (!path.startsWith("/")) {
+    path = "/" + path;
+  }
+  const url = new URL(`${baseUrl}${path}`);
+  req.nextUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
+  if (req?.nextUrl?.searchParams?.get("alt") === "sse") {
+    url.searchParams.set("alt", "sse");
+  }
+  const fetchUrl = url.toString();
+
+  let fetchOptions: RequestInit = {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      // 统一使用解析后的 apiKey（当使用服务器配置时来自环境变量，否则来自用户请求）
+      "x-goog-api-key": apiKey || "",
+    },
+    method: req.method,
+    // body: req.body, // Remove original body
+    // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
+    redirect: "manual",
+    // @ts-ignore
+    duplex: "half",
+    signal: controller.signal,
+  };
+
+  // Modify request body
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    try {
+      // Clone the request to avoid consuming the original body
+      const clientJson = await req.clone().json();
+
+      // Remove qadchat specific fields
+      delete clientJson.provider;
+      delete clientJson.path;
+
+      // Convert the cleaned JSON object to a string
+      const cleanedBody = JSON.stringify(clientJson);
+
+      // Update fetchOptions with the cleaned body
+      fetchOptions.body = cleanedBody;
+    } catch (error) {
+      // If the body is not JSON, use the original body
+      console.warn("Request body is not JSON, using original body", error);
+      fetchOptions.body = req.body;
+    }
+  }
+
+  try {
+    const res = await fetch(fetchUrl, fetchOptions);
+    // to prevent browser prompt for credentials
+    const newHeaders = new Headers(res.headers);
+    newHeaders.delete("www-authenticate");
+    // to disable nginx buffering
+    newHeaders.set("X-Accel-Buffering", "no");
+
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: newHeaders,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
