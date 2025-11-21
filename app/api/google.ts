@@ -131,8 +131,34 @@ async function request(
     url.searchParams.set("alt", "sse");
   }
   const fetchUrl = url.toString();
+// === 关键修复：只转发 Google 官方 API 认可的字段 ===
+    let rawBody = await req.text();  // 因为 req.body 是 stream，已不能重复读
+    let jsonBody: any = {};
+    if (rawBody) {
+      try {
+        jsonBody = JSON.parse(rawBody);
+      } catch (e) {
+        return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+      }
+    }
 
-  const fetchOptions: RequestInit = {
+    // 这几个字段 Google 完全不认识，必须删掉
+    const { provider, path, model, temperature, max_tokens, top_p, top_k, ...geminiBody } = jsonBody;
+
+    const fetchOptions: RequestInit = {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "x-goog-api-key": apiKey || "",
+      },
+      method: req.method,
+      body: Object.keys(geminiBody).length > 0 ? JSON.stringify(geminiBody) : null,
+      redirect: "manual",
+      // @ts-ignore
+      duplex: "half",
+      signal: controller.signal,
+    };
+/*  const fetchOptions: RequestInit = {
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
@@ -146,7 +172,7 @@ async function request(
     // @ts-ignore
     duplex: "half",
     signal: controller.signal,
-  };
+  };*/
 
   try {
     const res = await fetch(fetchUrl, fetchOptions);
