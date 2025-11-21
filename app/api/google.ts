@@ -134,22 +134,6 @@ async function request(
   }
   const fetchUrl = url.toString();
 
-  let fetchOptions: RequestInit = {
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-      // 统一使用解析后的 apiKey（当使用服务器配置时来自环境变量，否则来自用户请求）
-      "x-goog-api-key": apiKey || "",
-    },
-    method: req.method,
-    // body: req.body, // Remove original body
-    // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
-    redirect: "manual",
-    // @ts-ignore
-    duplex: "half",
-    signal: controller.signal,
-  };
-
   // Modify request body
   if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
     try {
