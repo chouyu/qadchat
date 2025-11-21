@@ -13,12 +13,10 @@ export async function handle(
 
   const authResult = auth(req, ModelProvider.GeminiPro);
   if (authResult.error) {
-    return NextResponse.json(authResult, {
-      status: 401,
-    });
+    return NextResponse.json(authResult, { status: 401 });
   }
 
-  // 获取API密钥（优先使用服务器配置）
+  // 获取 API Key（优先使用服务端配置）
   let apiKey = "";
   if (authResult.useServerConfig) {
     apiKey = process.env.GOOGLE_API_KEY || "";
@@ -65,6 +63,7 @@ export const preferredRegion = [
   "syd1",
 ];
 
+/** 修复后的核心转发函数 */
 async function request(
   req: NextRequest,
   apiKey: string,
@@ -73,10 +72,11 @@ async function request(
 ) {
   const controller = new AbortController();
 
-  // 解析自定义服务商配置（如有）
+  // —— 自定义 endpoint 支持（保持原逻辑不变）——
   const configHeader = req.headers.get("x-custom-provider-config");
   let customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
   let customApiKey = req.headers.get("x-custom-provider-api-key") || "";
+
   if (!customEndpoint && configHeader) {
     try {
       const decoded = atob(configHeader);
@@ -90,16 +90,15 @@ async function request(
     } catch {}
   }
 
-  // 允许自定义 endpoint 覆盖（已在上方读取到 customEndpoint）
   let baseUrl = customEndpoint
     ? customEndpoint
     : useServerConfig
       ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
       : GEMINI_BASE_URL;
 
-  // 计算子路径：优先使用路由参数，其次从 URL 中截取
   let path =
     subpath ?? `${req.nextUrl.pathname}`.replaceAll(ApiPath.Google, "");
+
   if (!subpath && path.startsWith("/api/custom_")) {
     const idx = path.indexOf("/google/");
     if (idx >= 0) {
@@ -110,62 +109,73 @@ async function request(
   if (!baseUrl.startsWith("http")) {
     baseUrl = `https://${baseUrl}`;
   }
-
   if (baseUrl.endsWith("/")) {
     baseUrl = baseUrl.slice(0, -1);
   }
 
-  const timeoutId = setTimeout(
-    () => {
-      controller.abort();
-    },
-    10 * 60 * 1000,
-  );
+  const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  if (!path.startsWith("/")) {
-    path = "/" + path;
-  }
+  if (!path.startsWith("/")) path = "/" + path;
+
   const url = new URL(`${baseUrl}${path}`);
   req.nextUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
   if (req?.nextUrl?.searchParams?.get("alt") === "sse") {
     url.searchParams.set("alt", "sse");
   }
   const fetchUrl = url.toString();
-// === 关键修复：只转发 Google 官方 API 认可的字段 ===
-    let rawBody = await req.text();  // 因为 req.body 是 stream，已不能重复读
-    let jsonBody: any = {};
-    if (rawBody) {
-      try {
-        jsonBody = JSON.parse(rawBody);
-      } catch (e) {
-        return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-      }
+
+  // —— 关键修复：只转发 Google 官方认可的字段 —— 
+  let rawBody = "";
+  try {
+    rawBody = await req.text();
+  } catch (e) {
+    clearTimeout(timeoutId);
+    return NextResponse.json({ error: "Failed to read request body" }, { status: 400 });
+  }
+
+  let jsonBody: any = {};
+  if (rawBody) {
+    try {
+      jsonBody = JSON.parse(rawBody);
+    } catch (e) {
+      clearTimeout(timeoutId);
+      return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
     }
+  }
 
-    // 这几个字段 Google 完全不认识，必须删掉
-    const { provider, path, model, temperature, max_tokens, top_p, top_k, ...geminiBody } = jsonBody;
+  // 删除 Google 官方完全不认识的所有字段
+  const {
+    provider,
+    path: _path,      // 避免变量名冲突
+    model,
+    temperature,
+    max_tokens,
+    top_p,
+    top_k,
+    stream,           // 官方用 ?alt=sse 控制流式，不需要这个字段
+    // 如有其他想删的字段继续加在这里
+    ...geminiBody
+  } = jsonBody;
 
-    const fetchOptions: RequestInit = {
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
-        "x-goog-api-key": apiKey || "",
-      },
-      method: req.method,
-      body: Object.keys(geminiBody).length > 0 ? JSON.stringify(geminiBody) : null,
-      redirect: "manual",
-      // @ts-ignore
-      duplex: "half",
-      signal: controller.signal,
-    };
-
+  const fetchOptions: RequestInit = {
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "x-goog-api-key": apiKey || "",
+    },
+    method: req.method,
+    body: Object.keys(geminiBody).length > 0 ? JSON.stringify(geminiBody) : null,
+    redirect: "manual",
+    // @ts-ignore - Edge runtime 需要这个
+    duplex: "half",
+    signal: controller.signal,
+  };
 
   try {
     const res = await fetch(fetchUrl, fetchOptions);
-    // to prevent browser prompt for credentials
+
     const newHeaders = new Headers(res.headers);
     newHeaders.delete("www-authenticate");
-    // to disable nginx buffering
     newHeaders.set("X-Accel-Buffering", "no");
 
     return new Response(res.body, {
