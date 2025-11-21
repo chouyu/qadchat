@@ -113,7 +113,6 @@ async function request(
     "stream",
     "temperature",
     "max_tokens",
-",
     "top_p",
     "top_k",
     "options",
