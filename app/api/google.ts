@@ -1,3 +1,4 @@
+cat app/api/google.ts 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "./auth";
 import { ApiPath, GEMINI_BASE_URL, ModelProvider } from "@/app/constant";
@@ -13,33 +14,57 @@ export async function handle(
 
   const authResult = auth(req, ModelProvider.GeminiPro);
   if (authResult.error) {
-    return NextResponse.json(authResult, { status: 401 });
+    return NextResponse.json(authResult, {
+      status: 401,
+    });
   }
 
+  // 获取API密钥（优先使用服务器配置）
   let apiKey = "";
   if (authResult.useServerConfig) {
     apiKey = process.env.GOOGLE_API_KEY || "";
   } else {
-    const token =
+    const bearToken =
       req.headers.get("x-goog-api-key") ||
       req.headers.get("Authorization") ||
       "";
-    apiKey = token.trim().replace(/^Bearer\s+/i, "");
+    apiKey = bearToken.trim().replaceAll("Bearer ", "").trim();
   }
 
   const subpath = params.path.join("/");
 
   try {
-    return await request(req, apiKey, authResult.useServerConfig, subpath);
+    const response = await request(
+      req,
+      apiKey,
+      authResult.useServerConfig,
+      subpath,
+    );
+    return response;
   } catch (e) {
-    console.error("[Google] error:", e);
+    console.error("[Google] ", e);
     return NextResponse.json(prettyObject(e));
   }
 }
 
 export const GET = handle;
 export const POST = handle;
+
 export const runtime = "edge";
+export const preferredRegion = [
+  "bom1",
+  "cle1",
+  "cpt1",
+  "gru1",
+  "hnd1",
+  "iad1",
+  "icn1",
+  "kix1",
+  "pdx1",
+  "sfo1",
+  "sin1",
+  "syd1",
+];
 
 async function request(
   req: NextRequest,
@@ -48,106 +73,100 @@ async function request(
   subpath?: string,
 ) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000);
 
-  // ---------- URL ----------
-  let baseUrl = useServerConfig
-    ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
-    : GEMINI_BASE_URL;
+  // 解析自定义服务商配置（如有）
+  const configHeader = req.headers.get("x-custom-provider-config");
+  let customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
+  let customApiKey = req.headers.get("x-custom-provider-api-key") || "";
+  if (!customEndpoint && configHeader) {
+    try {
+      const decoded = atob(configHeader);
+      const uint8Array = new Uint8Array(
+        decoded.split("").map((c) => c.charCodeAt(0)),
+      );
+      const json = new TextDecoder().decode(uint8Array);
+      const cfg = JSON.parse(json || "{}");
+      customEndpoint = cfg?.endpoint || customEndpoint;
+      customApiKey = cfg?.apiKey || customApiKey;
+    } catch {}
+  }
 
-  const customEndpoint = req.headers.get("x-custom-provider-endpoint") || "";
-  if (customEndpoint) baseUrl = customEndpoint;
-  if (!baseUrl.startsWith("http")) baseUrl = `https://${baseUrl}`;
-  if (baseUrl.endsWith("/")) baseUrl = baseUrl.slice(0, -1);
+  // 允许自定义 endpoint 覆盖（已在上方读取到 customEndpoint）
+  let baseUrl = customEndpoint
+    ? customEndpoint
+    : useServerConfig
+      ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
+      : GEMINI_BASE_URL;
 
-  let path = subpath ?? req.nextUrl.pathname.replaceAll(ApiPath.Google, "");
+  // 计算子路径：优先使用路由参数，其次从 URL 中截取
+  let path =
+    subpath ?? `${req.nextUrl.pathname}`.replaceAll(ApiPath.Google, "");
   if (!subpath && path.startsWith("/api/custom_")) {
     const idx = path.indexOf("/google/");
-    if (idx >= 0) path = path.slice(idx + "/google/".length);
+    if (idx >= 0) {
+      path = path.slice(idx + "/google/".length);
+    }
   }
-  if (!path.startsWith("/")) path = "/" + path;
 
+  if (!baseUrl.startsWith("http")) {
+    baseUrl = `https://${baseUrl}`;
+  }
+
+  if (baseUrl.endsWith("/")) {
+    baseUrl = baseUrl.slice(0, -1);
+  }
+
+  const timeoutId = setTimeout(
+    () => {
+      controller.abort();
+    },
+    10 * 60 * 1000,
+  );
+
+  if (!path.startsWith("/")) {
+    path = "/" + path;
+  }
   const url = new URL(`${baseUrl}${path}`);
   req.nextUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
-  if (req.nextUrl.searchParams.get("alt") === "sse") {
+  if (req?.nextUrl?.searchParams?.get("alt") === "sse") {
     url.searchParams.set("alt", "sse");
   }
   const fetchUrl = url.toString();
 
-  // ---------- 读取并清洗 body ----------
-  let rawBody = "";
-  try {
-    rawBody = await req.text();
-  } catch {
-    clearTimeout(timeoutId);
-    return NextResponse.json({ error: "Failed to read body" }, { status: 400 });
-  }
+  // ================= 核心修改开始 =================
 
-  console.log("[Google] 原始 body:", rawBody.slice(0, 500));
+  // 1. 异步读取并解析前端发来的 JSON 请求体
+  const clientJson = await req.json();
 
-  let jsonBody: any = {};
-  if (rawBody) {
-    try {
-      jsonBody = JSON.parse(rawBody);
-    } catch {
-      clearTimeout(timeoutId);
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-    }
-  }
+  // 2. 删除 qadchat 内部使用的、Google API 不认识的字段
+  delete clientJson.provider;
+  delete clientJson.path;
 
-  // 深度删除所有 Google 不认识的字段
-  const deepDelete = (obj: any, keys: string[]): void => {
-    if (!obj || typeof obj !== "object") return;
-    if (Array.isArray(obj)) {
-      obj.forEach((item) => deepDelete(item, keys));
-      return;
-    }
-    keys.forEach((k) => delete (obj as any)[k]);
-    Object.keys(obj).forEach((k) => deepDelete((obj as any)[k], keys));
-  };
+  // ================= 核心修改结束 =================
 
-  deepDelete(jsonBody, [
-    "provider",
-    "path",
-    "model",
-    "stream",
-    "temperature",
-    "max_tokens",
-    "top_p",
-    "top_k",
-    "options",
-    "extra",
-    "custom",
-  ]);
-
-  console.log("[Google] 发送给官方的干净 payload:");
-  console.log(JSON.stringify(jsonBody, null, 2));
-
-  // ---------- 发起请求（关键：不再使用 req.body）----------
   const fetchOptions: RequestInit = {
-    method: req.method,
     headers: {
       "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
       "Cache-Control": "no-store",
+      // 统一使用解析后的 apiKey（当使用服务器配置时来自环境变量，否则来自用户请求）
+      "x-goog-api-key": apiKey || "",
     },
-    body: Object.keys(jsonBody).length === 0 ? null : JSON.stringify(jsonBody),
-    signal: controller.signal,
+    method: req.method,
+    // 3. 使用清理过的、纯净的 JSON 对象作为新的请求体
+    body: JSON.stringify(clientJson),
+    // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
     redirect: "manual",
-    // @ts-ignore Edge Runtime 需要 duplex，但 TS 不知道
+    // @ts-ignore
     duplex: "half",
+    signal: controller.signal,
   };
 
   try {
     const res = await fetch(fetchUrl, fetchOptions);
-
-    if (!res.ok) {
-      const err = await res.text();
-      console.error("[Google] 官方返回错误:", res.status, err);
-    }
-
+    // to prevent browser prompt for credentials
     const newHeaders = new Headers(res.headers);
     newHeaders.delete("www-authenticate");
+    // to disable nginx buffering
     newHeaders.set("X-Accel-Buffering", "no");
 
     return new Response(res.body, {
