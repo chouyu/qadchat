@@ -113,14 +113,12 @@ async function request(
     } catch {}
   }
 
-  // 允许自定义 endpoint 覆盖（已在上方读取到 customEndpoint）
   let baseUrl = customEndpoint
     ? customEndpoint
     : useServerConfig
     ? process.env.GOOGLE_BASE_URL || GEMINI_BASE_URL
     : GEMINI_BASE_URL;
 
-  // 计算子路径：优先使用路由参数，其次从 URL 中截取
   let path =
     subpath ?? `${req.nextUrl.pathname}`.replaceAll(ApiPath.Google, "");
 
@@ -151,32 +149,46 @@ async function request(
   }
 
   const url = new URL(`${baseUrl}${path}`);
-  req.nextUrl.searchParams.forEach((v, k) => url.searchParams.set(k, v));
+
+  // ---------------------------------------------------------
+  // 关键修正 1: 过滤 URL 查询参数 (Search Params)
+  // ---------------------------------------------------------
+  // 这里的 provider 和 path 是被 Next.js 注入或客户端误传的，必须剔除
+  const keyBlacklist = ["provider", "path", "slug"]; 
+  
+  req.nextUrl.searchParams.forEach((v, k) => {
+    if (!keyBlacklist.includes(k)) {
+      url.searchParams.set(k, v);
+    }
+  });
+
   if (req?.nextUrl?.searchParams?.get("alt") === "sse") {
     url.searchParams.set("alt", "sse");
   }
 
   const fetchUrl = url.toString();
 
-  // 处理 Body：如果是 POST 请求，拦截并清洗数据
+  // ---------------------------------------------------------
+  // 关键修正 2: 拦截 POST 请求并清洗 Body
+  // ---------------------------------------------------------
   let body: BodyInit | null = req.body;
+  
   if (req.method === "POST") {
     try {
-      // 必须先转为 json 才能修改
+      // 尝试解析 JSON，如果失败则回退到原始 body (Stream)
       const jsonBody = await req.json();
-      // 递归移除 provider 和 path 字段
-      cleanRequestBody(jsonBody, ["provider", "path"]);
+      
+      // 递归清洗数据
+      cleanRequestBody(jsonBody, keyBlacklist);
+      
+      // 重新序列化
       body = JSON.stringify(jsonBody);
     } catch (e) {
-      // 如果解析 JSON 失败（或者是空 body），则不做处理，
-      // 但因为已经消费了 req.json()，这里如果不做处理会导致后续流不可用。
-      // 所以 catch 中通常意味着 body 不是 json 或者为空，我们忽略即可。
-      // 如果这里报错，body 仍然是 req.body (stream)，但流可能已被锁定。
-      // 为了稳健，如果是 POST 但解析失败，我们不再发送 body 或者尝试发空对象，
-      // 但通常 Google 请求都是标准 JSON。
-      console.error("[Google] Failed to parse/clean body", e);
-      // 尝试重置 body 为 null 或空 json 防止请求挂起
-      // 实际生产中如果解析失败通常意味着请求已经损坏
+      // 如果不是 JSON (例如文件上传) 或 body 为空，忽略错误，继续使用流
+      // 注意：如果 req.json() 报错，流可能已被读取，这里是一个潜在风险点
+      // 但对于 Chat 接口，通常都是标准 JSON。
+      console.error("[Google] Body parse/clean failed, fallback to original body", e);
+      // 如果解析失败，body 变量保持为 req.body (stream)，希望它还能用
     }
   }
 
@@ -184,12 +196,10 @@ async function request(
     headers: {
       "Content-Type": "application/json",
       "Cache-Control": "no-store",
-      // 统一使用解析后的 apiKey（当使用服务器配置时来自环境变量，否则来自用户请求）
       "x-goog-api-key": apiKey || "",
     },
     method: req.method,
     body: body,
-    // to fix #2485: https://stackoverflow.com/questions/55920957/cloudflare-worker-typeerror-one-time-use-body
     redirect: "manual",
     // @ts-ignore
     duplex: "half",
@@ -198,11 +208,10 @@ async function request(
 
   try {
     const res = await fetch(fetchUrl, fetchOptions);
-    // to prevent browser prompt for credentials
     const newHeaders = new Headers(res.headers);
     newHeaders.delete("www-authenticate");
-    // to disable nginx buffering
     newHeaders.set("X-Accel-Buffering", "no");
+    
     return new Response(res.body, {
       status: res.status,
       statusText: res.statusText,
