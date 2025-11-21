@@ -156,9 +156,18 @@ async function request(
       // Clone the request to avoid consuming the original body
       const clientJson = await req.clone().json();
 
-      // Remove qadchat specific fields
-      delete clientJson.provider;
-      delete clientJson.path;
+      // Recursive function to remove fields
+      function removeFields(obj: any) {
+        for (const key in obj) {
+          if (key === 'provider' || key === 'path') {
+            delete obj[key];
+          } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+            removeFields(obj[key]); // Recursive call
+          }
+        }
+      }
+
+      removeFields(clientJson);
 
       // Convert the cleaned JSON object to a string
       const cleanedBody = JSON.stringify(clientJson);
