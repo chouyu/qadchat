@@ -154,7 +154,7 @@ async function request(
   // 关键修正 1: 过滤 URL 查询参数 (Search Params)
   // ---------------------------------------------------------
   // 这里的 provider 和 path 是被 Next.js 注入或客户端误传的，必须剔除
-  const keyBlacklist = ["provider", "path", "slug"]; 
+  const keyBlacklist = ["provider", "path"]; 
   
   req.nextUrl.searchParams.forEach((v, k) => {
     if (!keyBlacklist.includes(k)) {
